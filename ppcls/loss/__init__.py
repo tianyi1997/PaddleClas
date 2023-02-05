@@ -42,6 +42,9 @@ from .deephashloss import DSHSDLoss
 from .deephashloss import LCDSHLoss
 from .deephashloss import DCHLoss
 
+from .metabinloss import InterDomainShuffleLoss
+from .metabinloss import IntraDomainScatterLoss
+
 
 class CombinedLoss(nn.Layer):
     def __init__(self, config_list):
@@ -74,7 +77,10 @@ class CombinedLoss(nn.Layer):
                 weight = self.loss_weight[idx]
                 loss = {key: loss[key] * weight for key in loss}
                 loss_dict.update(loss)
-            loss_dict["loss"] = paddle.add_n(list(loss_dict.values()))
+            loss_dict["loss"] = paddle.add_n([
+                x.astype(paddle.get_default_dtype())
+                for x in loss_dict.values()
+            ])
         return loss_dict
 
 
