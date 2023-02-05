@@ -114,7 +114,6 @@ class MetaBIN(nn.Layer):
 
 def ResNet50_metabin(pretrained=False,
                      use_ssld=False,
-                     stride_list=[2, 2, 2, 2, 1],
                      bias_lr_factor=2.0,
                      gate_lr_factor=20.0,
                      **kwargs):
@@ -136,19 +135,22 @@ def ResNet50_metabin(pretrained=False,
             elif "gate" in name:
                 params.optimize_attr['learning_rate'] = gate_lr_factor
 
+    stride_list = [2, 2, 2, 2, 1]
+
     pattern = []
     pattern.extend(["blocks[{}].conv{}.bn".format(i, j) \
                     for i in range(16) for j in range(3)])
     pattern.extend(["blocks[{}].short.bn".format(i) for i in [0, 3, 7, 13]])
     pattern.append("stem[0].bn")
+
     model = ResNet50(
-        pretrained=pretrained,
-        use_ssld=use_ssld,
-        stride_list=stride_list,
-        **kwargs)
+        pretrained=False, use_ssld=use_ssld, stride_list=stride_list, **kwargs)
+
     model.upgrade_sublayer(pattern, bn2metabin)
     setup_optimize_attr(
         model=model,
         bias_lr_factor=bias_lr_factor,
         gate_lr_factor=gate_lr_factor)
+
+    _load_pretrained(pretrained, model, MODEL_URLS["ResNet50"], use_ssld)
     return model
