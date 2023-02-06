@@ -244,7 +244,7 @@ Optimizer:
         warmup_epoch: 10
         warmup_start_lr: 0.0001
         by_epoch: False
-        last_epoch: 0
+        last_epoch: -1
       momentum: 0.9
       regularizer:
         name: "L2"

@@ -2,6 +2,7 @@ from collections import defaultdict
 import copy
 import paddle
 from paddle import nn
+from paddle.nn import functional as F
 from ..legendary_models.resnet import ResNet50, MODEL_URLS, _load_pretrained
 
 __all__ = [
@@ -65,6 +66,43 @@ class BINGate(nn.Layer):
         self.gate.set_value(self.gate.clip(0, 1))
 
 
+class MetaBN(nn.BatchNorm2D):
+    def forward(self, inputs, opt={}):
+        mode = opt.get("bn_mode", "general") if self.training else "eval"
+        if mode == "general":  # update, but not apply running_mean/var
+            result = F.batch_norm(inputs, self._mean, self._variance,
+                                  self.weight, self.bias, self.training,
+                                  self._momentum, self._epsilon)
+        elif mode == "hold":  # not update, not apply running_mean/var
+            result = F.batch_norm(
+                inputs,
+                paddle.mean(
+                    inputs, axis=(0, 2, 3)),
+                paddle.var(inputs, axis=(0, 2, 3)),
+                self.weight,
+                self.bias,
+                self.training,
+                self._momentum,
+                self._epsilon)
+        elif mode == "eval":  # fix and apply running_mean/var,
+            if self._mean is None:
+                result = F.batch_norm(
+                    inputs,
+                    paddle.mean(
+                        inputs, axis=(0, 2, 3)),
+                    paddle.var(inputs, axis=(0, 2, 3)),
+                    self.weight,
+                    self.bias,
+                    True,
+                    self._momentum,
+                    self._epsilon)
+            else:
+                result = F.batch_norm(inputs, self._mean, self._variance,
+                                      self.weight, self.bias, False,
+                                      self._momentum, self._epsilon)
+        return result
+
+
 class MetaBIN(nn.Layer):
     """
     MetaBIN (Meta Batch-Instance Normalization)
@@ -73,14 +111,14 @@ class MetaBIN(nn.Layer):
 
     def __init__(self, num_features):
         super().__init__()
-        self.batch_norm = nn.BatchNorm2D(
+        self.batch_norm = MetaBN(
             num_features=num_features, use_global_stats=True)
         self.instance_norm = nn.InstanceNorm2D(num_features=num_features)
         self.gate = BINGate(num_features=num_features)
         self.opt = defaultdict()
 
     def forward(self, inputs):
-        out_bn = self.batch_norm(inputs)
+        out_bn = self.batch_norm(inputs, self.opt)
         out_in = self.instance_norm(inputs)
         gate = self.gate(self.opt)
         gate = gate.unsqueeze([0, -1, -1])
@@ -94,6 +132,7 @@ class MetaBIN(nn.Layer):
         """
         enable_inside_update: enable inside updating for `gate` in MetaBIN
         lr_gate: learning rate of `gate` during meta-train phase
+        bn_mode: control the running stats & updating of BN
         """
         self.check_opt(opt)
         self.opt = copy.deepcopy(opt)
@@ -110,6 +149,8 @@ class MetaBIN(nn.Layer):
             TypeError('Got the wrong type of `lr_gate`. Please use `float` type.')
         assert isinstance(opt.get('enable_inside_update', True), bool), \
             TypeError('Got the wrong type of `enable_inside_update`. Please use `bool` type.')
+        assert opt.get('bn_mode', "general") in ["general", "hold", "eval"], \
+            TypeError('Got the wrong value of `bn_mode`.')
 
 
 def ResNet50_metabin(pretrained=False,

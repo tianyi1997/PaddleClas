@@ -85,9 +85,9 @@ def train_epoch_metabin(engine, epoch_id, print_batch_step):
                         engine.train_dataloader)
                     train_batch = next(engine.train_dataloader_iter)
 
-        out, basic_loss_dict = basic_update(engine, train_batch)
+        out, basic_loss_dict = basic_update(engine=engine, batch=train_batch)
         mtrain_loss_dict, mtest_loss_dict = metalearning_update(
-            engine, mtrain_batch, mtest_batch)
+            engine=engine, mtrain_batch=mtrain_batch, mtest_batch=mtest_batch)
         loss_dict = {
             **
             {"train_" + key: value
@@ -125,8 +125,25 @@ def train_epoch_metabin(engine, epoch_id, print_batch_step):
             engine.lr_sch[i].step()
 
 
-def setup_opt(model, opt):
-    for layer in model.sublayers():
+def setup_opt(engine, stage):
+    assert stage in ["train", "mtrain", "mtest"]
+    opt = defaultdict()
+    if stage == "train":
+        opt["bn_mode"] = "general"
+        opt["enable_inside_update"] = False
+        opt["lr_gate"] = 0.0
+    elif stage == "mtrain":
+        opt["bn_mode"] = "hold"
+        opt["enable_inside_update"] = False
+        opt["lr_gate"] = 0.0
+    elif stage == "mtest":
+        norm_lr = engine.lr_sch[1].last_lr
+        cyclic_lr = engine.lr_sch[2].get_lr()
+        engine.lr_sch[2].step()  # update cyclic learning rate
+        opt["bn_mode"] = "hold"
+        opt["enable_inside_update"] = True
+        opt["lr_gate"] = norm_lr * cyclic_lr
+    for layer in engine.model.sublayers():
         if isinstance(layer, MetaBIN):
             layer.setup_opt(opt)
 
@@ -189,52 +206,46 @@ def backward(engine, loss, optimizer):
     scaled = engine.scaler.scale(loss)
     scaled.backward()
     engine.scaler.minimize(optimizer, scaled)
-    #optimizer.step()
     for layer in engine.model.sublayers():
         if isinstance(layer, BINGate):
             layer.clip_gate()
 
 
 def basic_update(engine, batch):
+    setup_opt(engine, "train")
     train_loss_func = build_loss(engine.config["Loss"]["Basic"])
     out, train_loss_dict = forward(engine, batch, train_loss_func)
     train_loss = train_loss_dict["loss"]
     backward(engine, train_loss, engine.optimizer[0])
-    for i in range(len(engine.optimizer)):
-        engine.optimizer[i].clear_grad()
+    engine.optimizer[0].clear_grad()
+    reset_opt(engine.model)
     return out, train_loss_dict
 
 
 def metalearning_update(engine, mtrain_batch, mtest_batch):
     # meta train
     mtrain_loss_func = build_loss(engine.config["Loss"]["MetaTrain"])
+    setup_opt(engine, "mtrain")
+
     mtrain_batch_info = defaultdict()
     mtrain_batch_info = {"label": mtrain_batch[1], "domain": mtrain_batch[2]}
     out = engine.model(mtrain_batch[0], mtrain_batch[1])
     mtrain_loss_dict = mtrain_loss_func(out, mtrain_batch_info)
     mtrain_loss = mtrain_loss_dict["loss"]
+    engine.optimizer[1].clear_grad()
     mtrain_loss.backward()
 
     # meta test
     mtest_loss_func = build_loss(engine.config["Loss"]["MetaTest"])
-
-    opt = defaultdict()
-    norm_lr = engine.lr_sch[1].last_lr
-    cyclic_lr = engine.lr_sch[2].get_lr()
-    engine.lr_sch[2].step()  # update cyclic learning rate
-
-    opt["enable_inside_update"] = True
-    opt["lr_gate"] = norm_lr * cyclic_lr
-    setup_opt(engine.model, opt)
+    setup_opt(engine, "mtest")
 
     out, mtest_loss_dict = forward(engine, mtest_batch, mtest_loss_func)
-    for i in range(len(engine.optimizer)):
-        engine.optimizer[i].clear_grad()
+    engine.optimizer[1].clear_grad()
     mtest_loss = mtest_loss_dict["loss"]
     backward(engine, mtest_loss, engine.optimizer[1])
 
-    for i in range(len(engine.optimizer)):
-        engine.optimizer[i].clear_grad()
+    engine.optimizer[0].clear_grad()
+    engine.optimizer[1].clear_grad()
     reset_opt(engine.model)
 
     return mtrain_loss_dict, mtest_loss_dict
