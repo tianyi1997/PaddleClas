@@ -42,8 +42,8 @@ def ResNet50_adaptive_max_pool2d(pretrained=False, use_ssld=False, **kwargs):
 
 
 class BINGate(nn.Layer):
-    def __init__(self, num_features, name_scope=None, dtype="float32"):
-        super().__init__(name_scope, dtype)
+    def __init__(self, num_features):
+        super().__init__()
         self.gate = self.create_parameter(
             shape=[num_features],
             default_initializer=nn.initializer.Constant(1.0))
@@ -71,8 +71,8 @@ class MetaBIN(nn.Layer):
     reference: https://arxiv.org/abs/2011.14670
     """
 
-    def __init__(self, num_features, name_scope=None, dtype="float32"):
-        super().__init__(name_scope, dtype)
+    def __init__(self, num_features):
+        super().__init__()
         self.batch_norm = nn.BatchNorm2D(
             num_features=num_features, use_global_stats=True)
         self.instance_norm = nn.InstanceNorm2D(num_features=num_features)
@@ -114,8 +114,8 @@ class MetaBIN(nn.Layer):
 
 def ResNet50_metabin(pretrained=False,
                      use_ssld=False,
-                     bias_lr_factor=2.0,
-                     gate_lr_factor=20.0,
+                     bias_lr_factor=1.0,
+                     gate_lr_factor=1.0,
                      **kwargs):
     """
     ResNet50 which replaces all `bn` layer with MetaBIN
