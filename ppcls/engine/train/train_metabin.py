@@ -25,6 +25,7 @@ from ppcls.engine.train.utils import update_loss, update_metric, log_info, type_
 from ppcls.utils import profiler
 from ppcls.data import build_dataloader
 from ppcls.arch.backbone.variant_models.resnet_variant import MetaBIN, BINGate
+from ppcls.loss import build_loss
 
 
 def train_epoch_metabin(engine, epoch_id, print_batch_step):
@@ -172,13 +173,16 @@ def get_meta_data(meta_dataloader_iter, num_domain):
     return mtrain_batch, mtest_batch
 
 
-def forward(engine, batch):
+def forward(engine, batch, loss_func):
+    batch_info = defaultdict()
+    batch_info = {"label": batch[1], "domain": batch[2]}
     amp_level = engine.config["AMP"].get("level", "O1").upper()
     with paddle.amp.auto_cast(
             custom_black_list={"flatten_contiguous_range", "greater_than"},
             level=amp_level):
         out = engine.model(batch[0], batch[1])
-    return out
+        loss_dict = loss_func(out, batch_info)
+    return out, loss_dict
 
 
 def backward(engine, loss, optimizer):
@@ -192,16 +196,10 @@ def backward(engine, loss, optimizer):
 
 
 def basic_update(engine, batch):
-    batch_info = defaultdict()
-    batch_info = {"label": batch[1], "domain": batch[2]}
-    out = forward(engine, batch)
-    loss_dict = engine.train_loss_func(out, batch_info)
-    train_loss = loss_dict["CELoss"] + loss_dict["TripletLossV2"]
+    train_loss_func = build_loss(engine.config["Loss"]["Basic"])
+    out, train_loss_dict = forward(engine, batch, train_loss_func)
+    train_loss = train_loss_dict["loss"]
     backward(engine, train_loss, engine.optimizer[0])
-    train_loss_dict = {
-        "CELoss": loss_dict["CELoss"],
-        "TripletLossV2": loss_dict["TripletLossV2"]
-    }
     for i in range(len(engine.optimizer)):
         engine.optimizer[i].clear_grad()
     return out, train_loss_dict
@@ -209,14 +207,17 @@ def basic_update(engine, batch):
 
 def metalearning_update(engine, mtrain_batch, mtest_batch):
     # meta train
+    mtrain_loss_func = build_loss(engine.config["Loss"]["MetaTrain"])
     mtrain_batch_info = defaultdict()
     mtrain_batch_info = {"label": mtrain_batch[1], "domain": mtrain_batch[2]}
     out = engine.model(mtrain_batch[0], mtrain_batch[1])
-    mtrain_loss_dict = engine.train_loss_func(out, mtrain_batch_info)
-    mtrain_loss = mtrain_loss_dict.pop("loss")
+    mtrain_loss_dict = mtrain_loss_func(out, mtrain_batch_info)
+    mtrain_loss = mtrain_loss_dict["loss"]
     mtrain_loss.backward()
 
     # meta test
+    mtest_loss_func = build_loss(engine.config["Loss"]["MetaTest"])
+
     opt = defaultdict()
     norm_lr = engine.lr_sch[1].last_lr
     cyclic_lr = engine.lr_sch[2].get_lr()
@@ -226,18 +227,10 @@ def metalearning_update(engine, mtrain_batch, mtest_batch):
     opt["lr_gate"] = norm_lr * cyclic_lr
     setup_opt(engine.model, opt)
 
-    mtest_batch_info = defaultdict()
-    mtest_batch_info = {"label": mtest_batch[1], "domain": mtest_batch[2]}
-
-    out = forward(engine, mtest_batch)
+    out, mtest_loss_dict = forward(engine, mtest_batch, mtest_loss_func)
     for i in range(len(engine.optimizer)):
         engine.optimizer[i].clear_grad()
-    loss_dict = engine.train_loss_func(out, mtest_batch_info)
-    mtest_loss_dict = {
-        "CELoss": loss_dict["CELoss"],
-        "TripletLossV2": loss_dict["TripletLossV2"]
-    }
-    mtest_loss = mtest_loss_dict["CELoss"] + mtest_loss_dict["TripletLossV2"]
+    mtest_loss = mtest_loss_dict["loss"]
     backward(engine, mtest_loss, engine.optimizer[1])
 
     for i in range(len(engine.optimizer)):
