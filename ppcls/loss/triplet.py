@@ -45,8 +45,6 @@ class TripletLossV2(nn.Layer):
             target: ground truth labels with shape (num_classes)
         """
         inputs = input[self.feature_from]
-        if isinstance(target, dict):
-            target = target["label"]
 
         if self.normalize_feature:
             inputs = 1. * inputs / (paddle.expand_as(
