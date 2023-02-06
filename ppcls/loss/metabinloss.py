@@ -25,6 +25,38 @@ from .celoss import CELoss
 from .triplet import TripletLoss
 
 
+def euclidean_dist(x, y):
+    m, n = x.shape[0], y.shape[0]
+    xx = paddle.pow(x, 2).sum(1, keepdim=True).expand([m, n])
+    yy = paddle.pow(y, 2).sum(1, keepdim=True).expand([n, m]).t()
+    dist = xx + yy - 2 * paddle.matmul(x, y.t())
+    dist = dist.clip(min=1e-12).sqrt()  # for numerical stability
+    return dist
+
+
+def hard_example_mining(dist_mat, is_pos, is_neg):
+    """For each anchor, find the hardest positive and negative sample.
+    Args:
+      dist_mat: pairwise distance between samples, shape [N, M]
+      is_pos: positive index with shape [N, M]
+      is_neg: negative index with shape [N, M]
+    Returns:
+      dist_ap: distance(anchor, positive); shape [N]
+      dist_an: distance(anchor, negative); shape [N]
+    """
+    assert len(dist_mat.shape) == 2
+    dist_ap = list()
+    for i in range(dist_mat.shape[0]):
+        dist_ap.append(paddle.max(dist_mat[i][is_pos[i]]))
+    dist_ap = paddle.stack(dist_ap)
+
+    dist_an = list()
+    for i in range(dist_mat.shape[0]):
+        dist_an.append(paddle.min(dist_mat[i][is_neg[i]]))
+    dist_an = paddle.stack(dist_an)
+    return dist_ap, dist_an
+
+
 class IntraDomainScatterLoss(nn.Layer):
     """
     IntraDomainScatterLoss
@@ -83,55 +115,29 @@ class InterDomainShuffleLoss(nn.Layer):
         target = batch["label"]
         domains = batch["domain"]
         inputs = input[self.feature_from]
+        bs = inputs.shape[0]
 
         if self.normalize_feature:
             inputs = 1. * inputs / (paddle.expand_as(
                 paddle.norm(
                     inputs, p=2, axis=-1, keepdim=True), inputs) + 1e-12)
 
-        bs = inputs.shape[0]
-
         # compute distance
-        dist_mat = paddle.pow(inputs, 2).sum(axis=1, keepdim=True).expand(
-            [bs, bs])
-        dist_mat = dist_mat + dist_mat.t()
-        dist_mat = paddle.addmm(
-            input=dist_mat, x=inputs, y=inputs.t(), alpha=-2.0, beta=1.0)
-        dist_mat = paddle.clip(dist_mat, min=1e-12).sqrt()
+        dist_mat = euclidean_dist(inputs, inputs)
 
         is_same_img = np.zeros(shape=[bs, bs], dtype=bool)
         np.fill_diagonal(is_same_img, True)
         is_same_img = paddle.to_tensor(is_same_img)
-        is_same_instance = target.reshape([bs, 1]).expand([bs, bs])\
-            .equal(target.reshape([bs, 1]).expand([bs, bs]).t())
+        is_diff_instance = target.reshape([bs, 1]).expand([bs, bs])\
+            .not_equal(target.reshape([bs, 1]).expand([bs, bs]).t())
         is_same_domain = domains.reshape([bs, 1]).expand([bs, bs])\
             .equal(domains.reshape([bs, 1]).expand([bs, bs]).t())
+        is_diff_domain = is_same_domain == False
 
-        set_all = []
-        set_all.extend([is_same_instance * (is_same_img == False)])
-        set_all.extend(
-            [(is_same_instance == False) * (is_same_domain == True)])
-        set_all.extend([is_same_domain == False])
+        is_pos = paddle.logical_or(is_same_img, is_diff_domain)
+        is_neg = paddle.logical_and(is_diff_instance, is_same_domain)
 
-        is_pos = copy.deepcopy(is_same_img)
-        is_neg = paddle.zeros_like(is_same_img, dtype=bool)
-        for i, bool_flag in enumerate([0, 0, 1]):
-            if bool_flag == 1:
-                is_pos = paddle.logical_or(is_pos, set_all[i])
-
-        for i, bool_flag in enumerate([0, 1, 0]):
-            if bool_flag == 1:
-                is_neg = paddle.logical_or(is_neg, set_all[i])
-
-        dist_ap = list()
-        for i in range(dist_mat.shape[0]):
-            dist_ap.append(paddle.max(dist_mat[i][is_pos[i]]))
-        dist_ap = paddle.stack(dist_ap)
-
-        dist_an = list()
-        for i in range(dist_mat.shape[0]):
-            dist_an.append(paddle.min(dist_mat[i][is_neg[i]]))
-        dist_an = paddle.stack(dist_an)
+        dist_ap, dist_an = hard_example_mining(dist_mat, is_pos, is_neg)
 
         y = paddle.ones_like(dist_an)
         loss = F.soft_margin_loss(dist_an - dist_ap, y)
@@ -141,20 +147,51 @@ class InterDomainShuffleLoss(nn.Layer):
 
 
 class CELossForMetaBIN(CELoss):
-    def __init__(self, reduction="mean", epsilon=None):
-        super().__init__(reduction, epsilon)
+    def _labelsmoothing(self, target, class_num):
+        if len(target.shape) == 1 or target.shape[-1] != class_num:
+            one_hot_target = F.one_hot(target, class_num)
+        else:
+            one_hot_target = target
+        # epsilon is different from the one in original CELoss
+        epsilon = class_num / (class_num - 1) * self.epsilon
+        soft_target = F.label_smooth(one_hot_target, epsilon=epsilon)
+        soft_target = paddle.reshape(soft_target, shape=[-1, class_num])
+        return soft_target
 
     def forward(self, x, batch):
         label = batch["label"]
         return super().forward(x, label)
 
 
-class TripletLossForMetaBIN(TripletLoss):
-    def __init__(self, margin=1, feature_from="feature"):
-        super().__init__(margin)
+class TripletLossForMetaBIN(nn.Layer):
+    def __init__(self,
+                 margin=1,
+                 normalize_feature=False,
+                 feature_from="feature"):
+        super(TripletLossForMetaBIN, self).__init__()
+        self.margin = margin
         self.feature_from = feature_from
+        self.normalize_feature = normalize_feature
 
     def forward(self, input, batch):
-        input["feature"] = input[self.feature_from]
-        target = batch["label"]
-        return super().forward(input, target)
+        inputs = input[self.feature_from]
+        targets = batch["label"]
+        bs = inputs.shape[0]
+        all_targets = targets
+
+        if self.normalize_feature:
+            inputs = 1. * inputs / (paddle.expand_as(
+                paddle.norm(
+                    inputs, p=2, axis=-1, keepdim=True), inputs) + 1e-12)
+
+        dist_mat = euclidean_dist(inputs, inputs)
+
+        is_pos = all_targets.reshape([bs, 1]).expand([bs, bs]).equal(
+            all_targets.reshape([bs, 1]).expand([bs, bs]).t())
+        is_neg = all_targets.reshape([bs, 1]).expand([bs, bs]).not_equal(
+            all_targets.reshape([bs, 1]).expand([bs, bs]).t())
+        dist_ap, dist_an = hard_example_mining(dist_mat, is_pos, is_neg)
+
+        y = paddle.ones_like(dist_an)
+        loss = F.margin_ranking_loss(dist_an, dist_ap, y, margin=self.margin)
+        return {"TripletLoss": loss}
