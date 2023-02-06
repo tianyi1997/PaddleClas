@@ -44,10 +44,10 @@ def ResNet50_adaptive_max_pool2d(pretrained=False, use_ssld=False, **kwargs):
 class BINGate(nn.Layer):
     def __init__(self, num_features, name_scope=None, dtype="float32"):
         super().__init__(name_scope, dtype)
-        self.gate = paddle.create_parameter(
+        self.gate = self.create_parameter(
             shape=[num_features],
-            dtype='float32',
             default_initializer=nn.initializer.Constant(1.0))
+        self.add_parameter("gate", self.gate)
 
     def forward(self, opt={}):
         flag_update = 'lr_gate' in opt and \

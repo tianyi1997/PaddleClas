@@ -25,7 +25,7 @@ Arch:
   name: "RecModel"
   Backbone:
     name: "ResNet50_metabin"
-    pretrained: False  # "metabin_resnet50_pretrained"
+    pretrained: "metabin_resnet50_pretrained"
     bias_lr_factor: 2.0
     gate_lr_factor: 20.0
   BackboneStopLayer:
@@ -178,13 +178,12 @@ DataLoader:
 # loss function config for traing/eval process
 Loss:
   Train:
-    - CELoss:
+    - CELossForMetaBIN:
         weight: 1.0
         epsilon: 0.1
-    - TripletLossV2:
+    - TripletLossForMetaBIN:
         weight: 1.0
         margin: 0.3
-        normalize_feature: False
         feature_from: "backbone"
     - IntraDomainScatterLoss:
         weight: 1.0
@@ -194,9 +193,43 @@ Loss:
         weight: 1.0
         normalize_feature: False
         feature_from: "backbone"
-  Eval:
-    - CELoss:
+  Basic:
+    - CELossForMetaBIN:
         weight: 1.0
+        epsilon: 0.1
+    - TripletLossForMetaBIN:
+        weight: 1.0
+        margin: 0.3
+        feature_from: "backbone"
+  MetaTrain:
+    - CELossForMetaBIN:
+        weight: 1.0
+        epsilon: 0.1
+    - TripletLossForMetaBIN:
+        weight: 1.0
+        margin: 0.3
+        feature_from: "backbone"
+    - IntraDomainScatterLoss:
+        weight: 1.0
+        normalize_feature: True
+        feature_from: "backbone"
+    - InterDomainShuffleLoss:
+        weight: 1.0
+        normalize_feature: False
+        feature_from: "backbone"
+  MetaTest:
+    - CELossForMetaBIN:
+        weight: 1.0
+        epsilon: 0.1
+    - TripletLossForMetaBIN:
+        weight: 1.0
+        margin: 0.3
+        feature_from: "backbone"
+  Eval:
+    - TripletLossForMetaBIN:
+        weight: 1.0
+        margin: 0.3
+        feature_from: "backbone"
 
 Optimizer:
   - Momentum:
